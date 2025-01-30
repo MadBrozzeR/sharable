@@ -64,6 +64,7 @@ const ACTIONS = {
   '/act/stop': function (request, response) {
     response.writeHead(204);
     response.end();
+    console.log('Server is being stopped');
     server.close();
   },
 }
@@ -85,13 +86,28 @@ function getAction (request, response) {
   }
 }
 
+function getPath (...route) {
+  return route.join('/').replace(/\/{2,}/g, '/');
+}
+
 async function checkType (path) {
   const toCheck = path instanceof Array ? path : [path];
   const promises = toCheck.map((item) => fs.stat(item));
 
-  const stats = await Promise.all(promises);
+  try {
+    const stats = await Promise.allSettled(promises);
 
-  return stats.map((item) => (item.isDirectory() ? 'directory' : 'file'));
+    return stats.map((item) => {
+      if (item.status === 'rejected') {
+        return 'failed';
+      }
+
+      return item.value.isDirectory() ? 'directory' : 'file';
+    });
+  } catch (error) {
+    console.log(error);
+    return [];
+  }
 }
 
 function sorter (item1, item2) {
@@ -104,11 +120,11 @@ function sorter (item1, item2) {
 
 function readdir (dirname) {
   return fs.readdir(PROC_PARAMS.ROOT + dirname).then(records => {
-    return checkType(records.map(item => (PROC_PARAMS.ROOT + dirname + '/' + item)))
+    return checkType(records.map(item => (getPath(PROC_PARAMS.ROOT, dirname, item))))
       .then(types => types.map((type, index) => ({
         type: type,
         name: records[index],
-        path: (dirname === '/' ? '' : dirname) + '/' + records[index],
+        path: getPath(dirname, records[index]),
       })));
   }).then(records =>
     records.sort(sorter).map((record) => {
@@ -129,7 +145,7 @@ function getFileName (path) {
 }
 
 function getBackLink (current) {
-  return current === '/' ? '' : template(TEMPLATE.DIR, { name: '..', link: current + '/..' });
+  return current === '/' ? '' : template(TEMPLATE.DIR, { name: '..', link: getPath(current, '..') });
 }
 
 async function getFiles (request, response) {
