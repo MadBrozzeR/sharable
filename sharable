@@ -61,6 +61,7 @@ const DEFAULT_URL = {
 };
 
 const ACTIONS = {
+  // Doesn't work well enough, don't rely on it
   '/act/stop': function (request, response) {
     response.writeHead(204);
     response.end();
