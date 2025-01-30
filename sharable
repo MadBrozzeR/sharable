@@ -1,0 +1,184 @@
+#!/usr/bin/env node
+
+const http  = require('http');
+const fs = require('fs/promises');
+
+const DEFAULTS = {
+  PORT: 9460,
+  HOST: '0.0.0.0',
+  INSTALL_DIR: '/usr/local/bin',
+  ROOT: '/home/shared',
+};
+
+const PROC_PARAMS = (function () {
+  if (process.argv[2] === 'install') {
+    return {
+      ACTION: 'install',
+      DIRECTORY: process.argv[3] || DEFAULTS.INSTALL_DIR,
+    };
+  } else {
+    return {
+      ACTION: 'server',
+      HOST: DEFAULTS.HOST,
+      PORT: DEFAULTS.PORT,
+      ROOT: process.argv[2] || DEFAULTS.ROOT,
+    };
+  }
+})();
+
+const TEMPLATE = {
+  ROOT: `
+<!DOCTYPE html>
+<html>
+<head>
+<title>{{title}}</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1" />
+<style>
+</style>
+</head>
+<body>
+{{content}}
+</body>
+</html>
+  `,
+  DIR: `
+<div class="directory"><a class="directory_link" href="{{link}}">[ {{name}} ]</a></div>
+  `,
+  FILE: `
+<div class="file"><a class="file_link" href="{{link}}">{{name}}</a></div>
+  `
+};
+
+const TEMPLATE_KEY_RE = /\{\{(\w+)\}\}/g;
+
+let server;
+
+const DEFAULT_URL = {
+  '/favicon.ico': {
+    type: 'image/ico',
+    content: Buffer.from(''),
+  },
+};
+
+const ACTIONS = {
+  '/act/stop': function (request, response) {
+    response.writeHead(204);
+    response.end();
+    server.close();
+  },
+}
+
+function template (template, substitutions) {
+  return template.trim().replace(TEMPLATE_KEY_RE, (original, key) => (key in substitutions)
+    ? substitutions[key]
+    : original
+  );
+}
+
+function getAction (request, response) {
+  if (request.method === 'POST') {
+    if (request.url in ACTIONS) {
+      ACTIONS[request.url](request, response);
+    }
+  } else {
+    getFiles(request, response);
+  }
+}
+
+async function checkType (path) {
+  const toCheck = path instanceof Array ? path : [path];
+  const promises = toCheck.map((item) => fs.stat(item));
+
+  const stats = await Promise.all(promises);
+
+  return stats.map((item) => (item.isDirectory() ? 'directory' : 'file'));
+}
+
+function sorter (item1, item2) {
+  if (item1.type === 'directory' && item2.type !== 'directory') {
+    return -1;
+  }
+
+  return 1;
+}
+
+function readdir (dirname) {
+  return fs.readdir(PROC_PARAMS.ROOT + dirname).then(records => {
+    return checkType(records.map(item => (PROC_PARAMS.ROOT + dirname + '/' + item)))
+      .then(types => types.map((type, index) => ({
+        type: type,
+        name: records[index],
+        path: (dirname === '/' ? '' : dirname) + '/' + records[index],
+      })));
+  }).then(records =>
+    records.sort(sorter).map((record) => {
+      return record.type === 'directory'
+        ? template(TEMPLATE.DIR, { name: record.name, link: record.path })
+        : template(TEMPLATE.FILE, { name: record.name, link: record.path });
+    }).join('')
+  );
+}
+
+function getFileName (path) {
+  const slashPos = path.lastIndexOf('/');
+  if (slashPos === -1) {
+    return path;
+  }
+
+  return path.substring(slashPos + 1);
+}
+
+function getBackLink (current) {
+  return current === '/' ? '' : template(TEMPLATE.DIR, { name: '..', link: current + '/..' });
+}
+
+async function getFiles (request, response) {
+  const defaults = DEFAULT_URL[request.url];
+
+  if (defaults) {
+    response.writeHead(200, { 'content-type': defaults.type });
+    response.end(defaults.content);
+  } else {
+    const file = PROC_PARAMS.ROOT + request.url;
+    const types = await checkType(file);
+
+    if (types[0] === 'directory') {
+      readdir(request.url).then(content => {
+        const data = getBackLink(request.url) + template(TEMPLATE.ROOT, { content, title: PROC_PARAMS.ROOT });
+
+        response.writeHead(200, {
+          'content-type': 'text/html',
+        });
+        response.end(data);
+      });
+    } else {
+      const filename = getFileName(file);
+
+      fs.readFile(file).then(data => {
+        response.writeHead(200, {
+          'content-type': 'application/octet-stream',
+          'content-disposition': `attachment; filename="${filename}"`
+        });
+        response.end(data);
+      });
+    }
+  }
+}
+
+function processor (request, response) {
+  getAction(request, response);
+}
+
+switch (PROC_PARAMS.ACTION) {
+  case 'install':
+    const scriptName = getFileName(__filename);
+    fs.readFile(__filename).then((data) => fs.writeFile(PROC_PARAMS.DIRECTORY + '/' + scriptName, data));
+    break;
+  case 'server':
+    server = http.createServer(processor).listen(PROC_PARAMS.PORT, function () {
+      console.log(`Server is listening on ${PROC_PARAMS.HOST}:${PROC_PARAMS.PORT}`);
+    });
+    break;
+  default:
+    throw new Error('Unexpected action');
+}
