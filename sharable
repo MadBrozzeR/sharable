@@ -21,7 +21,7 @@ const PROC_PARAMS = (function () {
       ACTION: 'server',
       HOST: DEFAULTS.HOST,
       PORT: DEFAULTS.PORT,
-      ROOT: process.argv[2] || DEFAULTS.ROOT,
+      ROOT: process.argv[2] && (process.argv[2] === '.' ? process.cwd() : process.argv[2]) || DEFAULTS.ROOT,
     };
   }
 })();
@@ -33,11 +33,14 @@ const TEMPLATE = {
 <head>
 <title>{{title}}</title>
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,minimum-scale=1" />
-<style>
-</style>
+<style>{{styles}}</style>
 </head>
 <body>
-{{content}}
+<div class="toolbar">
+  <div class="toolbar_right">
+  </div>
+</div>
+{{body}}
 </body>
 </html>
   `,
@@ -46,7 +49,23 @@ const TEMPLATE = {
   `,
   FILE: `
 <div class="file"><a class="file_link" href="{{link}}">{{name}}</a></div>
-  `
+  `,
+  LAYOUT: `
+<div class="dir-content">{{content}}</div>
+<div class="upload-block">
+  <form method="POST" action="/act/upload" enctype='multipart/form-data'>
+    <input type="hidden" value="{{current}}" name="directory" />
+    <input type="file" multiple name="files[]" />
+    <button type="submit">upload</button>
+  </form>
+</div>
+  `,
+  STYLES: `
+body,html { height: 100%; margin: 0; }
+body {display: flex; flex-direction: column;}
+.dir-content { flex:1; overflow: auto; padding: 5px; }
+.upload-block { height: 24px; padding: 5px; }
+  `,
 };
 
 const TEMPLATE_KEY_RE = /\{\{(\w+)\}\}/g;
@@ -62,12 +81,125 @@ const DEFAULT_URL = {
 
 const ACTIONS = {
   // Doesn't work well enough, don't rely on it
-  '/act/stop': function (request, response) {
+  '/act/stop'(request, response) {
     response.writeHead(204);
     response.end();
     console.log('Server is being stopped');
     server.close();
   },
+  async '/act/upload'(request, response) {
+    const data = await getPostData(request);
+    const parsed = parseFormData(request, data);
+    const location = parsed.directory[0].payload.toString();
+
+    await Promise.all(parsed['files[]'].map(function (fileData) {
+      return fs.writeFile(
+        `${PROC_PARAMS.ROOT}${location === '/' ? '' : location}/${fileData.filename}`,
+        fileData.payload
+      );
+    }));
+
+    response.writeHead(302, { location });
+    response.end();
+  },
+}
+
+function getPostData (request) {
+  const result = {
+    chunks: [],
+    length: 0,
+  };
+
+  return new Promise(function (resolve, reject) {
+    request.on('error', reject);
+    request.on('data', function (chunk) {
+      result.chunks.push(chunk);
+      result.length += chunk.length;
+    });
+    request.on('end', function () {
+      resolve(Buffer.concat(result.chunks, result.length));
+    });
+  });
+}
+
+const CT_RE = /^multipart\/form-data;\s*boundary=(.+)$/;
+const CD_RE = /[Cc]ontent-[Dd]isposition:\s*form-data;\s*(.+)(?:\r\n|$)/;
+const CD_PARAMS_RE = /(\w+)="((?:[^"\\]|\\.)*)"/g;
+const HEADER_RE = /(.+?):\s*(.+?)(?:;\s*(.+))?(?:\r\n|$)/g;
+const HEAER_NEW_LINE_RE = /\r\n\s+/g;
+
+function splitBuffer (buffer, glue) {
+  const result = [];
+  for (let position = 0 ; position < buffer.length ;) {
+    const newPosition = buffer.indexOf(glue, position);
+    if (newPosition === -1) {
+      result.push(buffer.slice(position));
+      position = buffer.length;
+    } else {
+      result.push(buffer.slice(position, newPosition));
+      position = newPosition + glue.length;
+    }
+  }
+
+  return result;
+}
+
+function match (value, regExp, callback) {
+  let regMatch = null;
+  let result = undefined;
+
+  while (regMatch = regExp.exec(value)) {
+    result = callback(regMatch, result);
+  }
+
+  return result;
+}
+
+function trimBuffer (buffer) {
+  const end = buffer.slice(-2);
+
+  if (end[0] === 0x0d && end[1] === 0x0a) {
+    return buffer.slice(0, -2);
+  }
+
+  return buffer;
+}
+
+function parseFormData (request, data) {
+  const boundary = (request.headers['content-type'].match(CT_RE))?.[1];
+  const formData = {};
+
+  const parts = splitBuffer(data, '--' + boundary).slice(1, -1).forEach(function (data) {
+    const [headersRaw, body] = splitBuffer(data, '\r\n\r\n');
+    const headersData = headersRaw.toString().replace(HEAER_NEW_LINE_RE, '');
+    const headers = match(headersData, HEADER_RE, function (regMatch, result = {}) {
+      result[regMatch[1].toLowerCase()] = {
+        name: regMatch[2],
+        params: match(regMatch[3], CD_PARAMS_RE, (regMatch, result = {}) => {
+          result[regMatch[1]] = regMatch[2];
+          return result;
+        }),
+      };
+
+      return result;
+    });
+
+    if (headers['content-disposition'].name === 'form-data') {
+      const name = headers['content-disposition'].params.name;
+      const data = {
+        payload: trimBuffer(body),
+        ...headers['content-disposition'].params,
+      };
+
+      if (name in formData) {
+        formData[name].push(data);
+      } else {
+        formData[name] = [data];
+      }
+    }
+  });
+
+  return formData;
 }
 
 function template (template, substitutions) {
@@ -161,7 +293,14 @@ async function getFiles (request, response) {
 
     if (types[0] === 'directory') {
       readdir(request.url).then(content => {
-        const data = getBackLink(request.url) + template(TEMPLATE.ROOT, { content, title: PROC_PARAMS.ROOT });
+        const data = template(TEMPLATE.ROOT, {
+          body: template(TEMPLATE.LAYOUT, {
+            content: getBackLink(request.url) + content,
+            current: request.url,
+          }),
+          title: PROC_PARAMS.ROOT,
+          styles: TEMPLATE.STYLES,
+        });
 
         response.writeHead(200, {
           'content-type': 'text/html',
