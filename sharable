@@ -2,6 +2,7 @@
 
 const http  = require('http');
 const fs = require('fs/promises');
+const os = require('os');
 
 const DEFAULTS = {
   PORT: 9460,
@@ -108,6 +109,20 @@ const ACTIONS = {
     response.writeHead(302, { location });
     response.end();
   },
+}
+
+function getCurrentIP () {
+  const nets = os.networkInterfaces();
+  for (const key in nets) {
+    for (let index = 0 ; index < nets[key].length ; ++index) {
+      const address = nets[key][index].address;
+      if (address.substring(0, 8) === '192.168.') {
+        return address;
+      }
+    }
+  }
+
+  return PROC_PARAMS.HOST;
 }
 
 function getPostData (request) {
@@ -363,8 +378,9 @@ switch (PROC_PARAMS.ACTION) {
     fs.readFile(__filename).then((data) => fs.writeFile(PROC_PARAMS.DIRECTORY + '/' + scriptName, data));
     break;
   case 'server':
-    server = http.createServer(processor).listen(PROC_PARAMS.PORT, function () {
-      console.log(`Server is listening on ${PROC_PARAMS.HOST}:${PROC_PARAMS.PORT}`);
+    const currentIP = getCurrentIP();
+    server = http.createServer(processor).listen(PROC_PARAMS.PORT, PROC_PARAMS.HOST, function () {
+      console.log(`Server is listening on ${currentIP}:${PROC_PARAMS.PORT}`);
     });
     break;
   default:
