@@ -7,7 +7,7 @@ const DEFAULTS = {
   PORT: 9460,
   HOST: '0.0.0.0',
   INSTALL_DIR: '/usr/local/bin',
-  ROOT: '/home/shared',
+  ROOT: '.',
 };
 
 const PROC_PARAMS = (function () {
@@ -59,6 +59,12 @@ const TEMPLATE = {
     <button type="submit">upload</button>
   </form>
 </div>
+  `,
+  P404: `
+<html>
+  <div>Not found: {{path}}</div>
+  <div><a href="/">Go to root</a></div>
+</html>
   `,
   STYLES: `
 body,html { height: 100%; margin: 0; }
@@ -281,22 +287,40 @@ function getBackLink (current) {
   return current === '/' ? '' : template(TEMPLATE.DIR, { name: '..', link: getPath(current, '..') });
 }
 
+function parseUrl (path) {
+  const result = {
+    url: '',
+    params: {}, // Doesn't matter yet (or forever)
+  };
+
+  const paramsPos = path.indexOf('?');
+
+  if (paramsPos > -1) {
+    result.url = decodeURIComponent(path.substring(0, paramsPos));
+  } else {
+    result.url = decodeURIComponent(path);
+  }
+
+  return result;
+}
+
 async function getFiles (request, response) {
-  const defaults = DEFAULT_URL[request.url];
+  const { url } = parseUrl(request.url);
+  const defaults = DEFAULT_URL[url];
 
   if (defaults) {
     response.writeHead(200, { 'content-type': defaults.type });
     response.end(defaults.content);
   } else {
-    const file = PROC_PARAMS.ROOT + request.url;
+    const file = PROC_PARAMS.ROOT + url;
     const types = await checkType(file);
 
     if (types[0] === 'directory') {
-      readdir(request.url).then(content => {
+      readdir(url).then(content => {
         const data = template(TEMPLATE.ROOT, {
           body: template(TEMPLATE.LAYOUT, {
-            content: getBackLink(request.url) + content,
-            current: request.url,
+            content: getBackLink(url) + content,
+            current: url,
           }),
           title: PROC_PARAMS.ROOT,
           styles: TEMPLATE.STYLES,
@@ -306,6 +330,10 @@ async function getFiles (request, response) {
           'content-type': 'text/html',
         });
         response.end(data);
+      }).catch((error) => {
+        console.error(error);
+        response.writeHead(404, { 'content-type': 'text/html' });
+        response.end(template(TEMPLATE.P404, { path: url }));
       });
     } else {
       const filename = getFileName(file);
@@ -316,6 +344,10 @@ async function getFiles (request, response) {
           'content-disposition': `attachment; filename="${filename}"`
         });
         response.end(data);
+      }).catch((error) => {
+        console.error(error);
+        response.writeHead(404, { 'content-type': 'text/html' });
+        response.end(template(TEMPLATE.P404, { path: url }));
       });
     }
   }
